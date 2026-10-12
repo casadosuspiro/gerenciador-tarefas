@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
 <title>Gerenciador de Tarefas</title>
 <style>
 :root{
@@ -556,7 +557,8 @@ function renderSidebar(){
 function renderMain(){
   const main = $('#main');
   if(ui.loading){
-    main.innerHTML = '<div class="placeholder"><h2>Carregando…</h2><p>Buscando suas tarefas na nuvem.</p></div>';
+    const bad = cloud.state === 'err';
+    main.innerHTML = `<div class="placeholder"><h2>${bad ? 'Não foi possível carregar' : 'Carregando…'}</h2><p>${bad ? esc(cloud.msg || 'Sem conexão com a nuvem') : 'Buscando suas tarefas na nuvem.'}</p>${bad ? '<button class="btn primary" data-act="cloud-retry">Tentar novamente</button>' : ''}</div>`;
     return;
   }
   if(data.active === 'home'){
@@ -932,6 +934,7 @@ document.addEventListener('click', e => {
     case 'tm-pick': openPicker(ui.task.start, ui.task.end, (s, en) => { ui.task.start = s; ui.task.end = en; }); break;
     case 'tm-save': saveTaskModal(); break;
     case 'sub-add': addSubtask(); break;
+    case 'cloud-retry': cloudRetry(); break;
     case 'sub-del': ui.task.subtasks = ui.task.subtasks.filter(s => s.id !== el.dataset.sid); renderModals(); break;
     case 'tm-cancel': ui.task = null; renderModals(); break;
     case 'tm-delete': {
@@ -1028,9 +1031,9 @@ const SYNC_TXT = { ok:'Sincronizado', sync:'Sincronizando…', err:'Sem conexão
 function syncBox(){
   if(!CLOUD_ON) return '';
   const st = cloud.state;
-  return `<div class="sync"><span class="sync-dot ${st}"></span><span>${SYNC_TXT[st] || ''}</span></div>`;
+  return `<div class="sync"><span class="sync-dot ${st}"></span><span>${esc(cloud.msg || SYNC_TXT[st] || '')}</span><button class="link-btn" data-act="cloud-retry">Atualizar</button></div>`;
 }
-function setSync(st){ cloud.state = st; renderSidebar(); }
+function setSync(st, msg){ cloud.state = st; cloud.msg = msg || ''; renderSidebar(); }
 const spacesJson = () => JSON.stringify(data.spaces);
 const modalOpen = () => !!(ui.task || ui.picker || ui.confirm || ui.spaceModal);
 function normalize(){
@@ -1060,6 +1063,7 @@ function cloudPush(){
   cloud.dirty = true; clearTimeout(cloud.timer); setSync('sync');
   cloud.timer = setTimeout(cloudPushNow, 500);
 }
+const errMsg = e => (e && e.code === 'permission-denied') ? 'Regras do Firestore bloqueando o acesso' : 'Sem conexão com a nuvem';
 async function cloudPushNow(){
   cloud.dirty = false;
   if(!cloud.ref){ return; }
@@ -1069,7 +1073,7 @@ async function cloudPushNow(){
   try{
     await cloud.ref.set({ json, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
     if(!cloud.dirty) setSync('ok');
-  }catch(e){ console.error(e); cloud.lastJson = prev; setSync('err'); }
+  }catch(e){ console.error(e); cloud.lastJson = prev; setSync('err', errMsg(e)); }
 }
 async function cloudConnect(){
   if(!CLOUD_ON) return;
@@ -1077,12 +1081,16 @@ async function cloudConnect(){
   setSync('sync');
   try{
     if(!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
-    cloud.db = cloud.db || firebase.firestore();
+    if(!cloud.db){
+      cloud.db = firebase.firestore();
+      try{ cloud.db.settings({ experimentalAutoDetectLongPolling:true, merge:true }); }catch(e){}
+    }
     cloud.ref = cloud.db.collection('workspaces').doc(DOC_ID);
     cloud.lastJson = '';
     let first = true;
     cloud.unsub = cloud.ref.onSnapshot(snap => {
       if(snap.metadata.hasPendingWrites) return;          // eco da própria escrita
+      if(!snap.exists && snap.metadata.fromCache) return; // cache vazio: espera o servidor responder
       const wasFirst = first; first = false;
       if(!snap.exists){
         // primeira vez: sobe os dados deste aparelho (ou os exemplos, se não havia nada)
@@ -1096,11 +1104,28 @@ async function cloudConnect(){
       cloud.pending = json; applyPending(); setSync('ok');
     }, err => {
       console.error(err);
-      if(ui.loading){ data.spaces = seed().spaces; ui.loading = false; render(); }
-      setSync('err');
+      setSync('err', errMsg(err));
+      if(ui.loading) render();
     });
-  }catch(e){ console.error(e); setSync('err'); }
+    setTimeout(() => { if(ui.loading){ setSync('err', 'A nuvem não respondeu'); render(); } }, 10000);
+  }catch(e){ console.error(e); setSync('err', errMsg(e)); if(ui.loading) render(); }
 }
+
+async function cloudRetry(){
+  if(!CLOUD_ON) return;
+  if(!ui.loading && (cloud.dirty || cloud.state === 'err')){ clearTimeout(cloud.timer); await cloudPushNow(); }
+  cloudConnect();
+}
+function cloudRefresh(){
+  if(!CLOUD_ON || !cloud.ref || cloud.dirty || ui.loading) return;
+  cloud.ref.get({ source:'server' }).then(snap => {
+    if(snap.exists && !cloud.dirty && snap.data().json !== spacesJson()){ cloud.pending = snap.data().json; applyPending(); }
+    setSync('ok');
+  }).catch(e => setSync('err', errMsg(e)));
+}
+document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible') cloudRefresh(); });
+window.addEventListener('online', cloudRefresh);
+window.addEventListener('focus', cloudRefresh);
 
 if(CLOUD_ON && !hadLocal){ data.spaces = []; ui.loading = true; }
 render();
