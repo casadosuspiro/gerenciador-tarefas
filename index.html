@@ -303,6 +303,15 @@ textarea.autosize{resize:none;min-height:0;overflow:hidden;display:block}
 .ag-list .chip{white-space:normal;overflow:visible;padding:6px 9px;font-size:13px;margin-bottom:5px}
 .ag-empty{padding:26px;text-align:center;color:var(--muted)}
 
+/* ---------- Status da nuvem ---------- */
+.sync{margin-top:18px;padding:10px 12px;border-radius:10px;background:#f6f8fb;font-size:12.5px;color:var(--muted);display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
+.sync-dot{width:8px;height:8px;border-radius:50%;background:#9ca3af;flex:none}
+.sync-dot.ok{background:#22c55e}
+.sync-dot.sync{background:#f59e0b}
+.sync-dot.err{background:#ef4444}
+.link-btn{border:0;background:transparent;color:var(--blue-d);font-weight:600;padding:0;margin-left:auto;font-size:12.5px}
+.link-btn:hover{text-decoration:underline}
+
 /* ---------- Responsivo ---------- */
 @media(max-width:1000px){.stats{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:820px){
@@ -378,6 +387,8 @@ textarea.autosize{resize:none;min-height:0;overflow:hidden;display:block}
 <main id="main"></main>
 <div id="modals"></div>
 
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
 /* =========================================================
    Utilidades
@@ -428,14 +439,30 @@ function seed(){
     }]
   };
 }
+let hadLocal = false;
 function load(){
   try{
     const r = JSON.parse(localStorage.getItem(KEY));
-    if(r && Array.isArray(r.spaces)) return r;
+    if(r && Array.isArray(r.spaces)){ hadLocal = true; return r; }
   }catch(e){}
   return seed();
 }
-function save(){ try{ localStorage.setItem(KEY, JSON.stringify(data)); }catch(e){} }
+function save(){ try{ localStorage.setItem(KEY, JSON.stringify(data)); }catch(e){} cloudPush(); }
+
+/* ---------- Firebase (sincronização entre aparelhos) ----------
+   Cole abaixo o firebaseConfig do seu projeto (Console Firebase > Configurações do projeto > Seus apps).
+   Enquanto os valores forem "COLE_AQUI", o app funciona só no navegador (localStorage), como antes. */
+const FIREBASE_CONFIG = {
+  apiKey: "COLE_AQUI",
+  authDomain: "COLE_AQUI",
+  projectId: "COLE_AQUI",
+  storageBucket: "COLE_AQUI",
+  messagingSenderId: "COLE_AQUI",
+  appId: "COLE_AQUI"
+};
+const CLOUD_ON = !String(FIREBASE_CONFIG.apiKey).startsWith('COLE_') && typeof firebase !== 'undefined';
+const DOC_ID = 'principal';   // todos os aparelhos leem e gravam neste mesmo documento
+const cloud = { state: CLOUD_ON ? 'sync' : 'off', ref: null, db: null, unsub: null, lastJson: '', pending: null, timer: null, dirty: false };
 
 let data = load();
 if(!data.view) data.view = 'table';
@@ -447,7 +474,7 @@ data.spaces.forEach(s => s.tasks.forEach(t => {
 if(data.active !== 'home' && !data.spaces.some(s => s.id === data.active)) data.active = 'home';
 
 const T0 = todayD();
-const ui = { month:{ y:T0.getFullYear(), m:T0.getMonth() }, spaceModal:false, task:null, picker:null, confirm:null, subDraft:'' };
+const ui = { month:{ y:T0.getFullYear(), m:T0.getMonth() }, spaceModal:false, task:null, picker:null, confirm:null, subDraft:'', loading:false };
 
 const curSpace = () => data.spaces.find(s => s.id === data.active);
 const findTask = id => { const s = curSpace(); return s && s.tasks.find(t => t.id === id); };
@@ -523,11 +550,15 @@ function renderSidebar(){
         </div>
         <div class="space-list">${items || '<div class="empty-note">Nenhum espaço ainda</div>'}</div>
       </div>
-    </nav>`;
+    </nav>${syncBox()}`;
 }
 
 function renderMain(){
   const main = $('#main');
+  if(ui.loading){
+    main.innerHTML = '<div class="placeholder"><h2>Carregando…</h2><p>Buscando suas tarefas na nuvem.</p></div>';
+    return;
+  }
   if(data.active === 'home'){
     main.innerHTML = `
       <div class="page-head"><div><h1>Início</h1></div></div>
@@ -990,7 +1021,90 @@ document.addEventListener('drop', e => {
   render();
 });
 
+/* =========================================================
+   Sincronização com o Firestore
+   ========================================================= */
+const SYNC_TXT = { ok:'Sincronizado', sync:'Sincronizando…', err:'Sem conexão com a nuvem' };
+function syncBox(){
+  if(!CLOUD_ON) return '';
+  const st = cloud.state;
+  return `<div class="sync"><span class="sync-dot ${st}"></span><span>${SYNC_TXT[st] || ''}</span></div>`;
+}
+function setSync(st){ cloud.state = st; renderSidebar(); }
+const spacesJson = () => JSON.stringify(data.spaces);
+const modalOpen = () => !!(ui.task || ui.picker || ui.confirm || ui.spaceModal);
+function normalize(){
+  data.spaces.forEach(s => (s.tasks || (s.tasks = [])).forEach(t => {
+    if(!Array.isArray(t.subtasks)) t.subtasks = [];
+    if(typeof t.notes !== 'string') t.notes = '';
+  }));
+}
+function applyPending(){
+  if(cloud.pending === null || modalOpen()) return;
+  const json = cloud.pending; cloud.pending = null;
+  try{
+    const spaces = JSON.parse(json);
+    if(Array.isArray(spaces)){
+      cloud.lastJson = json;
+      data.spaces = spaces; normalize();
+      if(data.active !== 'home' && !data.spaces.some(s => s.id === data.active)) data.active = 'home';
+      try{ localStorage.setItem(KEY, JSON.stringify(data)); }catch(e){}
+    }
+  }catch(e){ console.error(e); }
+  ui.loading = false; render();
+}
+setInterval(applyPending, 800);
+
+function cloudPush(){
+  if(!CLOUD_ON || ui.loading) return;
+  cloud.dirty = true; clearTimeout(cloud.timer); setSync('sync');
+  cloud.timer = setTimeout(cloudPushNow, 500);
+}
+async function cloudPushNow(){
+  cloud.dirty = false;
+  if(!cloud.ref){ return; }
+  const json = spacesJson();
+  if(json === cloud.lastJson){ setSync('ok'); return; }
+  const prev = cloud.lastJson; cloud.lastJson = json;
+  try{
+    await cloud.ref.set({ json, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+    if(!cloud.dirty) setSync('ok');
+  }catch(e){ console.error(e); cloud.lastJson = prev; setSync('err'); }
+}
+async function cloudConnect(){
+  if(!CLOUD_ON) return;
+  if(cloud.unsub){ cloud.unsub(); cloud.unsub = null; }
+  setSync('sync');
+  try{
+    if(!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    cloud.db = cloud.db || firebase.firestore();
+    cloud.ref = cloud.db.collection('workspaces').doc(DOC_ID);
+    cloud.lastJson = '';
+    let first = true;
+    cloud.unsub = cloud.ref.onSnapshot(snap => {
+      if(snap.metadata.hasPendingWrites) return;          // eco da própria escrita
+      const wasFirst = first; first = false;
+      if(!snap.exists){
+        // primeira vez: sobe os dados deste aparelho (ou os exemplos, se não havia nada)
+        if(ui.loading){ data.spaces = seed().spaces; ui.loading = false; render(); }
+        save(); return;
+      }
+      const json = snap.data().json;
+      if(json === cloud.lastJson){ setSync('ok'); return; }
+      if(cloud.dirty) return;                                // alteração local pendente vence
+      if(json === spacesJson()){ cloud.lastJson = json; ui.loading = false; setSync('ok'); if(wasFirst) render(); return; }
+      cloud.pending = json; applyPending(); setSync('ok');
+    }, err => {
+      console.error(err);
+      if(ui.loading){ data.spaces = seed().spaces; ui.loading = false; render(); }
+      setSync('err');
+    });
+  }catch(e){ console.error(e); setSync('err'); }
+}
+
+if(CLOUD_ON && !hadLocal){ data.spaces = []; ui.loading = true; }
 render();
+cloudConnect();
 </script>
 </body>
 </html>
