@@ -454,12 +454,12 @@ function save(){ try{ localStorage.setItem(KEY, JSON.stringify(data)); }catch(e)
    Cole abaixo o firebaseConfig do seu projeto (Console Firebase > Configurações do projeto > Seus apps).
    Enquanto os valores forem "COLE_AQUI", o app funciona só no navegador (localStorage), como antes. */
 const FIREBASE_CONFIG = {
-  apiKey: "COLE_AQUI",
-  authDomain: "COLE_AQUI",
-  projectId: "COLE_AQUI",
-  storageBucket: "COLE_AQUI",
-  messagingSenderId: "COLE_AQUI",
-  appId: "COLE_AQUI"
+  apiKey: "AIzaSyCQX_LCVizAkDsH4LNvWOXVxQy56sxd9xY",
+  authDomain: "gerenciador-tarefas-fda70.firebaseapp.com",
+  projectId: "gerenciador-tarefas-fda70",
+  storageBucket: "gerenciador-tarefas-fda70.firebasestorage.app",
+  messagingSenderId: "407737511506",
+  appId: "1:407737511506:web:35f8a268254491dd29398b"
 };
 const CLOUD_ON = !String(FIREBASE_CONFIG.apiKey).startsWith('COLE_') && typeof firebase !== 'undefined';
 const DOC_ID = 'principal';   // todos os aparelhos leem e gravam neste mesmo documento
