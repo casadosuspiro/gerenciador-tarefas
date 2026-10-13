@@ -478,7 +478,8 @@ const T0 = todayD();
 const ui = { month:{ y:T0.getFullYear(), m:T0.getMonth() }, spaceModal:false, task:null, picker:null, confirm:null, subDraft:'', loading:false };
 
 const curSpace = () => data.spaces.find(s => s.id === data.active);
-const findTask = id => { const s = curSpace(); return s && s.tasks.find(t => t.id === id); };
+const findTask = id => { for(const s of data.spaces){ const t = s.tasks.find(x => x.id === id); if(t) return t; } return null; };
+const spaceOf = id => data.spaces.find(s => s.tasks.some(t => t.id === id));
 
 /* =========================================================
    Lógica de datas / cronograma
@@ -562,9 +563,7 @@ function renderMain(){
     return;
   }
   if(data.active === 'home'){
-    main.innerHTML = `
-      <div class="page-head"><div><h1>Início</h1></div></div>
-      <div class="placeholder"><h2>Página inicial em breve</h2><p>Por enquanto, escolha um espaço no menu lateral ou crie um novo com o botão +.</p></div>`;
+    main.innerHTML = homeView();
     return;
   }
   const sp = curSpace();
@@ -652,6 +651,39 @@ function tableView(tasks){
   const fin = tasks.filter(t => t.status === 'done');
   return tableSection('Em andamento', active, 'Nenhuma tarefa em andamento neste mês.', true)
        + tableSection('Finalizadas', fin, 'Nenhuma tarefa finalizada neste mês.', false);
+}
+
+/* ---------- Início: tarefas da semana (segunda a domingo), separadas por espaço ---------- */
+function homeWeek(){
+  const t = todayD();
+  const s = addDays(t, -((t.getDay() + 6) % 7));
+  return { s, e: addDays(s, 6) };
+}
+function homeRow(t){
+  return `<tr class="${t.status === 'done' ? 'is-done' : ''}">
+    <td class="c-name" style="width:44%"><button class="name-btn" data-act="edit-task" data-id="${t.id}" title="Abrir tarefa">${esc(t.name)}</button>${subBadge(t)}</td>
+    <td class="c-period" data-label="Período" style="width:30%"><button class="period-btn" data-act="pick-period" data-id="${t.id}">${ICON.cal}<span>${fmtPeriod(t.start,t.end)}</span></button></td>
+    <td class="c-status" data-label="Status" style="width:26%">${selectPill('status', t.id, t.status)}</td>
+  </tr>`;
+}
+function homeView(){
+  const w = homeWeek();
+  const head = `<div class="page-head"><div><h1>Início</h1><p class="sub">Tarefas da semana: segunda ${fmtDM(w.s)} a domingo ${fmtDM(w.e)}</p></div></div>`;
+  if(!data.spaces.length){
+    return head + `<div class="placeholder"><h2>Nenhum espaço ainda</h2><p>Crie um espaço com o botão + no menu lateral para ver suas tarefas aqui.</p></div>`;
+  }
+  const cards = data.spaces.map(sp => {
+    const list = sp.tasks.filter(t => overlaps(t, w.s, w.e))
+      .sort((a,b) => a.start.localeCompare(b.start) || a.end.localeCompare(b.end) || a.name.localeCompare(b.name));
+    return `<section class="card">
+      <div class="card-head"><h2>${esc(sp.name)}</h2><span class="count">${list.length}</span></div>
+      <div class="tbl-wrap"><table style="min-width:640px">
+        <thead><tr><th>Nome da tarefa</th><th>Período</th><th>Status</th></tr></thead>
+        <tbody>${list.length ? list.map(homeRow).join('') : `<tr class="empty-row"><td colspan="3">Nenhuma tarefa nesta semana.</td></tr>`}</tbody>
+      </table></div>
+    </section>`;
+  }).join('');
+  return head + cards;
 }
 
 /* ---------- Linha do tempo ---------- */
@@ -856,8 +888,8 @@ function saveTaskModal(){
   const subtasks = t.subtasks.map(s => ({ id:s.id, text:s.text.trim(), done:!!s.done })).filter(s => s.text);
   const fields = { name:t.name.trim(), start:t.start, end:t.end, status:t.status, priority:t.priority, subtasks, notes:t.notes || '' };
   if(t.id){
-    const ex = sp.tasks.find(x => x.id === t.id);
-    Object.assign(ex, fields);
+    const ex = findTask(t.id);
+    if(ex) Object.assign(ex, fields);
   }else{
     sp.tasks.push({ id:uid(), ...fields });
   }
@@ -868,8 +900,16 @@ function addSubtask(){
   if(!text){ const i = $('#sub-new'); if(i) i.focus(); return; }
   ui.task.subtasks.push({ id:uid(), text, done:false });
   ui.subDraft = '';
+  persistSubs();
   renderModals();
   const i = $('#sub-new'); if(i) i.focus();
+}
+/* Em tarefa já cadastrada, subtarefas são gravadas na hora (sem depender do botão Salvar) */
+function persistSubs(){
+  if(!ui.task || !ui.task.id) return;
+  const ex = findTask(ui.task.id); if(!ex) return;
+  ex.subtasks = ui.task.subtasks.map(s => ({ id:s.id, text:String(s.text).trim(), done:!!s.done })).filter(s => s.text);
+  save(); renderMain();
 }
 function openPicker(start, end, onApply){
   const d = parse(start);
@@ -923,7 +963,7 @@ document.addEventListener('click', e => {
     case 'edit-task': { const t = findTask(id); if(t) openTaskModal(t); break; }
     case 'del-task': {
       const t = findTask(id);
-      askConfirm('Excluir tarefa', `Deseja excluir "${t.name}"?`, () => { sp.tasks = sp.tasks.filter(x => x.id !== id); save(); render(); });
+      askConfirm('Excluir tarefa', `Deseja excluir "${t.name}"?`, () => { const os = spaceOf(id); if(os) os.tasks = os.tasks.filter(x => x.id !== id); save(); render(); });
       break;
     }
     case 'pick-period': {
@@ -935,11 +975,11 @@ document.addEventListener('click', e => {
     case 'tm-save': saveTaskModal(); break;
     case 'sub-add': addSubtask(); break;
     case 'cloud-retry': cloudRetry(); break;
-    case 'sub-del': ui.task.subtasks = ui.task.subtasks.filter(s => s.id !== el.dataset.sid); renderModals(); break;
+    case 'sub-del': ui.task.subtasks = ui.task.subtasks.filter(s => s.id !== el.dataset.sid); persistSubs(); renderModals(); break;
     case 'tm-cancel': ui.task = null; renderModals(); break;
     case 'tm-delete': {
       const tid = ui.task.id, name = ui.task.name;
-      askConfirm('Excluir tarefa', `Deseja excluir "${name}"?`, () => { sp.tasks = sp.tasks.filter(x => x.id !== tid); ui.task = null; save(); render(); });
+      askConfirm('Excluir tarefa', `Deseja excluir "${name}"?`, () => { const os = spaceOf(tid); if(os) os.tasks = os.tasks.filter(x => x.id !== tid); ui.task = null; save(); render(); });
       break;
     }
     case 'pk-prev': { const p = ui.picker; if(p.vm === 0){ p.vm = 11; p.vy--; } else p.vm--; renderModals(); break; }
@@ -974,7 +1014,9 @@ document.addEventListener('change', e => {
     save(); render();
   }else if(el.dataset.sub === 'done' && ui.task){
     const s = ui.task.subtasks.find(x => x.id === el.dataset.sid);
-    if(s){ s.done = el.checked; renderModals(); }
+    if(s){ s.done = el.checked; persistSubs(); renderModals(); }
+  }else if(el.dataset.sub === 'text' && ui.task){
+    persistSubs();
   }else if(el.dataset.draft && ui.task){
     ui.task[el.dataset.draft] = el.value;
   }
@@ -1060,6 +1102,7 @@ setInterval(applyPending, 800);
 
 function cloudPush(){
   if(!CLOUD_ON || ui.loading) return;
+  cloud.pending = null;   // alteração local vence qualquer dado antigo que estivesse aguardando
   cloud.dirty = true; clearTimeout(cloud.timer); setSync('sync');
   cloud.timer = setTimeout(cloudPushNow, 500);
 }
